@@ -37,6 +37,9 @@ def startup():
 
 @app.get("/")
 def home():
+    root_index = BASE / "index.html"
+    if root_index.exists():
+        return FileResponse(root_index)
     return FileResponse(BASE / "static" / "index.html")
 
 

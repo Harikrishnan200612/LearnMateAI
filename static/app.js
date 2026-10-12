@@ -5,6 +5,37 @@
 const $ = (id) => document.getElementById(id);
 let currentDoc = null;
 
+/* ---------------------------- API Configuration ---------------------------- */
+
+function getApiBase() {
+  const custom = localStorage.getItem("learnmate_api_url");
+  if (custom && custom.trim()) {
+    return custom.trim().replace(/\/+$/, "");
+  }
+  if (window.LEARNMATE_API_BASE) {
+    return window.LEARNMATE_API_BASE.replace(/\/+$/, "");
+  }
+  // When running on GitHub Pages without an explicit backend URL set
+  if (window.location.hostname.endsWith("github.io")) {
+    return null;
+  }
+  // When running locally via file:// protocol
+  if (window.location.protocol === "file:") {
+    return "http://127.0.0.1:8000";
+  }
+  // Same-origin server (e.g. running FastAPI directly)
+  return "";
+}
+
+function apiUrl(endpoint) {
+  const base = getApiBase();
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : "/" + endpoint;
+  if (base === null) {
+    return null;
+  }
+  return base ? `${base}${cleanEndpoint}` : cleanEndpoint;
+}
+
 /* ---------------------------- Toasts ---------------------------- */
 
 function toast(message, type = "success") {
@@ -43,28 +74,79 @@ $("menuBtn").onclick = () => $("sidebar").classList.toggle("open");
 
 /* ---------------------------- Health / status pill ---------------------------- */
 
+function initStatusPill() {
+  const pill = $("statusPill");
+  pill.onclick = () => {
+    const current = localStorage.getItem("learnmate_api_url") || "";
+    const input = prompt(
+      "Configure LearnMate AI Backend URL\n\n" +
+      "If your FastAPI backend is running (e.g. locally at http://localhost:8000 or hosted on Render/Railway), enter its URL below.\n\n" +
+      "Leave empty to use default.",
+      current
+    );
+    if (input !== null) {
+      const trimmed = input.trim();
+      if (trimmed) {
+        localStorage.setItem("learnmate_api_url", trimmed);
+        toast(`Backend URL set to ${trimmed}`, "success");
+      } else {
+        localStorage.removeItem("learnmate_api_url");
+        toast("Reset backend URL to default", "info");
+      }
+      checkHealth();
+      loadStats();
+      loadDocuments();
+    }
+  };
+}
+
 async function checkHealth() {
+  const pill = $("statusPill");
+  const targetUrl = apiUrl("/api/health");
+  if (!targetUrl) {
+    pill.classList.remove("demo");
+    pill.classList.add("offline");
+    $("statusText").textContent = "Backend offline (Click to connect)";
+    pill.title = "Backend server is not connected. Click to configure backend URL (e.g. Render, Railway, or http://localhost:8000)";
+    return;
+  }
   try {
-    const r = await fetch("/api/health");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const r = await fetch(targetUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
-    const pill = $("statusPill");
+    pill.classList.remove("offline");
     if (d.ai_configured) {
       pill.classList.remove("demo");
       $("statusText").textContent = "AI tutor ready";
+      pill.title = "Connected to backend with live AI. Click to change backend URL.";
     } else {
       pill.classList.add("demo");
       $("statusText").textContent = "Demo mode — no API key";
+      pill.title = "Connected to backend in demo mode. Click to change backend URL.";
     }
   } catch {
-    $("statusText").textContent = "Offline";
+    pill.classList.remove("demo");
+    pill.classList.add("offline");
+    if (window.location.hostname.endsWith("github.io") && !localStorage.getItem("learnmate_api_url")) {
+      $("statusText").textContent = "Backend offline (Click to connect)";
+    } else {
+      $("statusText").textContent = "Backend offline";
+    }
+    pill.title = "Could not reach backend server. Click to configure backend URL.";
   }
 }
 
 /* ---------------------------- Stats ---------------------------- */
 
 async function loadStats() {
+  const targetUrl = apiUrl("/api/stats");
+  if (!targetUrl) return;
   try {
-    const r = await fetch("/api/stats");
+    const r = await fetch(targetUrl);
+    if (!r.ok) return;
     const d = await r.json();
     $("statDocs").textContent = d.documents ?? 0;
     $("statQuestions").textContent = d.questions ?? 0;
@@ -74,40 +156,57 @@ async function loadStats() {
 /* ---------------------------- Documents (sidebar) ---------------------------- */
 
 async function loadDocuments() {
-  const r = await fetch("/api/documents");
-  const docs = await r.json();
   const wrap = $("documents");
-  wrap.innerHTML = "";
-  if (!docs.length) {
-    wrap.innerHTML = '<div class="empty-docs">Nothing uploaded yet. Add a portion to get started.</div>';
+  const targetUrl = apiUrl("/api/documents");
+  if (!targetUrl) {
+    wrap.innerHTML = '<div class="empty-docs">Backend offline. Click status pill above to configure backend URL.</div>';
     return;
   }
-  docs.forEach((doc) => {
-    const b = document.createElement("button");
-    b.className = "doc-item" + (currentDoc && currentDoc.id === doc.id ? " active" : "");
-    b.innerHTML = `
-      <span class="dot"></span>
-      <span class="doc-text">
-        <span class="doc-name">${escapeHtml(doc.filename)}</span>
-        <span class="doc-sub">${escapeHtml(doc.subject || "General")} · ${doc.chunk_count} section${doc.chunk_count === 1 ? "" : "s"}</span>
-      </span>
-      <button class="doc-delete" title="Delete portion" data-id="${doc.id}">✕</button>
-    `;
-    b.onclick = (e) => {
-      if (e.target.closest(".doc-delete")) return;
-      openDocument(doc);
-    };
-    b.querySelector(".doc-delete").onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Delete "${doc.filename}"? This removes its chat history too.`)) return;
-      await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
-      toast("Portion deleted", "success");
-      if (currentDoc && currentDoc.id === doc.id) showUpload();
-      loadDocuments();
-      loadStats();
-    };
-    wrap.appendChild(b);
-  });
+  try {
+    const r = await fetch(targetUrl);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const docs = await r.json();
+    wrap.innerHTML = "";
+    if (!Array.isArray(docs) || !docs.length) {
+      wrap.innerHTML = '<div class="empty-docs">Nothing uploaded yet. Add a portion to get started.</div>';
+      return;
+    }
+    docs.forEach((doc) => {
+      const b = document.createElement("button");
+      b.className = "doc-item" + (currentDoc && currentDoc.id === doc.id ? " active" : "");
+      b.innerHTML = `
+        <span class="dot"></span>
+        <span class="doc-text">
+          <span class="doc-name">${escapeHtml(doc.filename)}</span>
+          <span class="doc-sub">${escapeHtml(doc.subject || "General")} · ${doc.chunk_count} section${doc.chunk_count === 1 ? "" : "s"}</span>
+        </span>
+        <button class="doc-delete" title="Delete portion" data-id="${doc.id}">✕</button>
+      `;
+      b.onclick = (e) => {
+        if (e.target.closest(".doc-delete")) return;
+        openDocument(doc);
+      };
+      b.querySelector(".doc-delete").onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete "${doc.filename}"? This removes its chat history too.`)) return;
+        const delUrl = apiUrl(`/api/documents/${doc.id}`);
+        if (delUrl) {
+          try {
+            await fetch(delUrl, { method: "DELETE" });
+            toast("Portion deleted", "success");
+          } catch (err) {
+            toast("Could not delete: " + err.message, "error");
+          }
+        }
+        if (currentDoc && currentDoc.id === doc.id) showUpload();
+        loadDocuments();
+        loadStats();
+      };
+      wrap.appendChild(b);
+    });
+  } catch {
+    wrap.innerHTML = '<div class="empty-docs">Backend offline. Connect a backend server to sync portions.</div>';
+  }
 }
 
 function escapeHtml(str) {
@@ -142,11 +241,18 @@ async function openDocument(doc) {
   loadDocuments();
 
   $("chat").innerHTML = `<div class="welcome"><div class="avatar ai">✦</div><div><h3>Your AI tutor is ready.</h3><p>Ask a question from "${escapeHtml(doc.filename)}", or try the Summary and Quiz tabs above.</p></div></div>`;
-  try {
-    const r = await fetch(`/api/documents/${doc.id}/messages`);
-    const messages = await r.json();
-    messages.forEach((m) => addMessage(m.role, m.content));
-  } catch {}
+  const msgUrl = apiUrl(`/api/documents/${doc.id}/messages`);
+  if (msgUrl) {
+    try {
+      const r = await fetch(msgUrl);
+      if (r.ok) {
+        const messages = await r.json();
+        if (Array.isArray(messages)) {
+          messages.forEach((m) => addMessage(m.role, m.content));
+        }
+      }
+    } catch {}
+  }
 }
 
 function resetPanel(name) {
@@ -195,6 +301,13 @@ function setUploadStatus(text, kind = "") {
 $("uploadBtn").onclick = async () => {
   const f = $("fileInput").files[0];
   if (!f) return setUploadStatus("Please choose a study file first.", "error");
+  const targetUrl = apiUrl("/api/upload");
+  if (!targetUrl) {
+    return setUploadStatus(
+      "Backend server is offline. LearnMate AI requires the Python FastAPI backend to process files and run AI models. Click the top-right status pill to configure your backend URL (e.g. https://your-backend.onrender.com or http://localhost:8000).",
+      "error"
+    );
+  }
   const fd = new FormData();
   fd.append("file", f);
   fd.append("subject", $("subject").value);
@@ -202,8 +315,13 @@ $("uploadBtn").onclick = async () => {
   $("uploadBtn").disabled = true;
   setUploadStatus("Processing your portion…");
   try {
-    const r = await fetch("/api/upload", { method: "POST", body: fd });
-    const d = await r.json();
+    const r = await fetch(targetUrl, { method: "POST", body: fd });
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw new Error(`Server returned HTTP ${r.status} (${r.statusText || "unavailable"})`);
+    }
     if (!r.ok) throw new Error(d.detail || "Upload failed");
     setUploadStatus("");
     toast(`"${d.filename}" is ready to study`, "success");
@@ -282,8 +400,14 @@ async function ask(q) {
   addMessage("user", q);
   $("question").value = "";
   const thinkingEl = addThinking();
+  const targetUrl = apiUrl("/api/ask");
+  if (!targetUrl) {
+    thinkingEl.remove();
+    addMessage("ai", "**Backend offline.** The AI tutor requires a running backend server. Click the top-right status pill to configure your backend URL.");
+    return;
+  }
   try {
-    const r = await fetch("/api/ask", {
+    const r = await fetch(targetUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -294,7 +418,12 @@ async function ask(q) {
         mode: $("mode").value,
       }),
     });
-    const d = await r.json();
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw new Error(`Server returned HTTP ${r.status}`);
+    }
     if (!r.ok) throw new Error(d.detail || "Request failed");
     thinkingEl.remove();
     addMessage("ai", d.answer);
@@ -316,13 +445,25 @@ async function generateSummary() {
   const body = $("summaryBody");
   body.className = "panel-body";
   body.innerHTML = `<div class="thinking"><span></span><span></span><span></span></div>`;
+  const targetUrl = apiUrl("/api/summary");
+  if (!targetUrl) {
+    body.innerHTML = `<p class="status-line error">Backend offline. Please connect your backend server via the top-right status pill.</p>
+      <div class="panel-actions" style="justify-content:center"><button id="summaryBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
+    return;
+  }
   try {
-    const r = await fetch("/api/summary", {
+    const r = await fetch(targetUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ document_id: currentDoc.id, language: $("language").value, level: $("level").value }),
     });
-    const d = await r.json();
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw new Error(`Server returned HTTP ${r.status}`);
+    }
     if (!r.ok) throw new Error(d.detail || "Could not generate summary");
     body.innerHTML = `<div class="rendered-md">${renderMarkdown(d.answer)}</div>
       <div class="panel-actions">
@@ -333,7 +474,9 @@ async function generateSummary() {
     $("summaryDownload").onclick = () => downloadText(`${currentDoc.filename}-summary.txt`, d.answer);
     loadStats();
   } catch (e) {
-    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>`;
+    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>
+      <div class="panel-actions" style="justify-content:center"><button id="summaryBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
   }
 }
 
@@ -355,13 +498,25 @@ async function generateQuiz() {
   const body = $("quizBody");
   body.className = "panel-body";
   body.innerHTML = `<div class="thinking"><span></span><span></span><span></span></div>`;
+  const targetUrl = apiUrl("/api/quiz");
+  if (!targetUrl) {
+    body.innerHTML = `<p class="status-line error">Backend offline. Please connect your backend server via the top-right status pill.</p>
+      <div class="panel-actions" style="justify-content:center"><button id="quizBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
+    return;
+  }
   try {
-    const r = await fetch("/api/quiz", {
+    const r = await fetch(targetUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ document_id: currentDoc.id, language: $("language").value, level: $("level").value }),
     });
-    const d = await r.json();
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw new Error(`Server returned HTTP ${r.status}`);
+    }
     if (!r.ok) throw new Error(d.detail || "Could not generate quiz");
     if (!d.questions || !d.questions.length) {
       body.innerHTML = `<p class="status-line error">The quiz could not be parsed. Try regenerating.</p>
@@ -372,7 +527,9 @@ async function generateQuiz() {
     quizState = { questions: d.questions, answers: {}, submitted: false };
     renderQuiz();
   } catch (e) {
-    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>`;
+    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>
+      <div class="panel-actions" style="justify-content:center"><button id="quizBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
   }
 }
 
@@ -451,13 +608,25 @@ async function generateFlashcards() {
   const body = $("flashBody");
   body.className = "panel-body";
   body.innerHTML = `<div class="thinking"><span></span><span></span><span></span></div>`;
+  const targetUrl = apiUrl("/api/flashcards");
+  if (!targetUrl) {
+    body.innerHTML = `<p class="status-line error">Backend offline. Please connect your backend server via the top-right status pill.</p>
+      <div class="panel-actions" style="justify-content:center"><button id="flashBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
+    return;
+  }
   try {
-    const r = await fetch("/api/flashcards", {
+    const r = await fetch(targetUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ document_id: currentDoc.id, language: $("language").value, level: $("level").value }),
     });
-    const d = await r.json();
+    let d;
+    try {
+      d = await r.json();
+    } catch {
+      throw new Error(`Server returned HTTP ${r.status}`);
+    }
     if (!r.ok) throw new Error(d.detail || "Could not generate flashcards");
     if (!d.cards || !d.cards.length) {
       body.innerHTML = `<p class="status-line error">Flashcards could not be parsed. Try regenerating.</p>
@@ -468,7 +637,9 @@ async function generateFlashcards() {
     flashState = { cards: d.cards, index: 0, flipped: false };
     renderFlashcards();
   } catch (e) {
-    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>`;
+    body.innerHTML = `<p class="status-line error">${escapeHtml(e.message)}</p>
+      <div class="panel-actions" style="justify-content:center"><button id="flashBtn" class="btn btn-primary">Try again</button></div>`;
+    bindPanelButtons();
   }
 }
 
@@ -529,6 +700,7 @@ function bindPanelButtons() {
 /* ---------------------------- Init ---------------------------- */
 
 initTheme();
+initStatusPill();
 bindPanelButtons();
 checkHealth();
 loadStats();
