@@ -1,0 +1,11 @@
+{
+  "name": "learnmate-ai",
+  "version": "2.0.0",
+  "description": "LearnMate AI — Personalized Learning Assistant",
+  "scripts": {
+    "dev": "python -m uvicorn app.main:app --reload",
+    "start": "python -m uvicorn app.main:app"
+  },
+  "author": "",
+  "license": "MIT"
+}
