@@ -150,7 +150,7 @@ async function loadStats() {
     const d = await r.json();
     $("statDocs").textContent = d.documents ?? 0;
     $("statQuestions").textContent = d.questions ?? 0;
-  } catch {}
+  } catch { }
 }
 
 /* ---------------------------- Documents (sidebar) ---------------------------- */
@@ -251,7 +251,7 @@ async function openDocument(doc) {
           messages.forEach((m) => addMessage(m.role, m.content));
         }
       }
-    } catch {}
+    } catch { }
   }
 }
 
