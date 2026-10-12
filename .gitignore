@@ -1,0 +1,19 @@
+# Environment variables
+.env
+
+# Databases
+*.db
+*.sqlite3
+
+# Python Virtual Environment
+venv/
+env/
+ENV/
+
+# Python Caches
+__pycache__/
+*.pyc
+
+# Uploaded Files
+uploads/*
+!uploads/.gitkeep
